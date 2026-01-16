@@ -1,8 +1,0 @@
-#<!-- Calibrations -->
-min_pos: -5000
-max_pos: 1600000
-tollerence: 5000
-#<!--ramp_parameters-->
-target_velocity: 0.025 
-#<!--safety_topic-->
-safetystop_topic: 'stop'
