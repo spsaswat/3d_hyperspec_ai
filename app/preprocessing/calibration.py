@@ -281,7 +281,9 @@ def white_dark_calibrate(raw_hdr, white_hdr, dark_hdr, outdir):
 
     # Save the calibrated cube
     calibrated_hdr = outdir + f"/calibrated_cube_{int(time())}.hdr"
-    spectral.envi.save_image(calibrated_hdr, calibrated_cube, dtype=np.float32)
+    spectral.envi.save_image(
+        calibrated_hdr, calibrated_cube, dtype=np.float32, interleave="bil"
+    )
 
     print(f"Calibrated cube saved to {calibrated_hdr}")
     return calibrated_cube
@@ -334,6 +336,8 @@ def white_dark_calibrate_from_rois(raw_hdr, white_roi, dark_roi, outdir):
     out_hdr = os.path.join(
         outdir, f"{os.path.basename(raw_hdr)[:-4]}_calibrated_roi.hdr"
     )
-    spectral.envi.save_image(out_hdr, calibrated, dtype=np.float32, force=True)
+    spectral.envi.save_image(
+        out_hdr, calibrated, dtype=np.float32, interleave="bil", force=True
+    )
     print(f"Calibrated cube saved to {out_hdr}")
     return calibrated
