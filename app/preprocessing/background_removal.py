@@ -34,24 +34,7 @@ def find_ndvi_threshold_consensus(ndvi):
     veg_comp = np.argmax(means)
     gmm_thresh = xs[np.argmax(probs[:, veg_comp] > 0.5)]
 
-    # Method 4: Yen entropy thresholding
-    yen_thresh = threshold_yen(ndvi_flat)
-
-    # Method 5: Elbow Detection
-    hist, bins = np.histogram(ndvi_flat, bins=256, density=True)
-    centers = (bins[:-1] + bins[1:]) / 2
-    hist_smooth = savgol_filter(hist, 21, 3)
-    curvature = np.gradient(np.gradient(hist_smooth))
-    peak_idx = np.argmax(hist_smooth)
-    elbow_idx = peak_idx + np.argmax(np.abs(curvature[peak_idx:]))
-    elbow_thresh = centers[elbow_idx]
-
-    # Method 6: MAD-based robust thresholding
-    median = np.median(ndvi_flat)
-    mad = np.median(np.abs(ndvi_flat - median))
-    mad_thresh = median + 3 * mad
-
-    # Method 7: Spatial-consistency aware thresholding
+    # Method 4: Spatial-consistency aware thresholding
     ndvi_smooth = gaussian_filter(ndvi, sigma=2)
     spatial_thresh = threshold_otsu(ndvi_smooth[np.isfinite(ndvi_smooth)])
 
@@ -61,9 +44,6 @@ def find_ndvi_threshold_consensus(ndvi):
             otsu_thresh,
             perc_thresh,
             gmm_thresh,
-            yen_thresh,
-            elbow_thresh,
-            mad_thresh,
             spatial_thresh,
         ]
     )
@@ -154,24 +134,7 @@ def find_nwaci_threshold_consensus(nwaci):
     veg_comp = np.argmax(means)
     nwaci_thresh = xs[np.argmax(probs[:, veg_comp] > 0.5)]
 
-    # Method 4: Yen entropy thresholding
-    yen_thresh = threshold_yen(nwaci_flat)
-
-    # Method 5: Elbow Detection
-    hist, bins = np.histogram(nwaci_flat, bins=256, density=True)
-    centers = (bins[:-1] + bins[1:]) / 2
-    hist_smooth = savgol_filter(hist, 21, 3)
-    curvature = np.gradient(np.gradient(hist_smooth))
-    peak_idx = np.argmax(hist_smooth)
-    elbow_idx = peak_idx + np.argmax(np.abs(curvature[peak_idx:]))
-    elbow_thresh = centers[elbow_idx]
-
-    # Method 6: MAD-based robust thresholding
-    median = np.median(nwaci_flat)
-    mad = np.median(np.abs(nwaci_flat - median))
-    mad_thresh = median + 3 * mad
-
-    # Method 7: Spatial-consistency aware thresholding
+    # Method 4: Spatial-consistency aware thresholding
     nwaci_smooth = gaussian_filter(nwaci, sigma=2)
     spatial_thresh = threshold_otsu(nwaci_smooth[np.isfinite(nwaci_smooth)])
 
@@ -181,9 +144,6 @@ def find_nwaci_threshold_consensus(nwaci):
             otsu_thresh,
             perc_thresh,
             nwaci_thresh,
-            yen_thresh,
-            elbow_thresh,
-            mad_thresh,
             spatial_thresh,
         ]
     )
