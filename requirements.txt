@@ -1,0 +1,5 @@
+spectral
+matplotlib
+pandas
+opencv-python
+scikit-image
