@@ -473,7 +473,8 @@ class CalibApp(QWidget):
 
             raw_basename = os.path.basename(self.raw_hdr)[:-4]
             out_hdr = os.path.join(output_dir, f"{raw_basename}_calibrated.hdr")
-            meta = self.calibrated_image.metadata.copy() if hasattr(self.calibrated_image, 'metadata') else {}
+            meta = spectral.open_image(self.raw_hdr).metadata
+            meta["description"] = f"Calibrated using ROIs at {time.ctime()}"
             #fix 1
             spectral.envi.save_image(
                 out_hdr,
@@ -511,7 +512,8 @@ class CalibApp(QWidget):
             raw_basename = os.path.basename(self.raw_hdr)[:-4]
             out_hdr = os.path.join(output_dir, f"{raw_basename}_no_background.hdr")
 
-            meta = self.plant_only.metadata.copy() if hasattr(self.plant_only, 'metadata') else {}
+            meta = spectral.open_image(self.raw_hdr).metadata
+            meta["description"] = f"Background removed using method at {time.ctime()}"
             #fix 2
             spectral.envi.save_image(
                 out_hdr,
