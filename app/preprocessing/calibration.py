@@ -1,7 +1,7 @@
 import spectral
 import numpy as np
 import cv2
-from time import time
+import time
 import os
 
 
@@ -280,9 +280,11 @@ def white_dark_calibrate(raw_hdr, white_hdr, dark_hdr, outdir):
     calibrated_cube = np.clip(calibrated_cube, 0, 1)  # Clip values to [0, 1]
 
     # Save the calibrated cube
-    calibrated_hdr = outdir + f"/calibrated_cube_{int(time())}.hdr"
+    calibrated_hdr = outdir + f"/calibrated_cube_{int(time.time())}.hdr"
+    meta = spectral.open_image(raw_hdr).metadata
+    meta["description"] = f"Calibrated using ROIs at {time.ctime()}"
     spectral.envi.save_image(
-        calibrated_hdr, calibrated_cube, dtype=np.float32, interleave="bil"
+        calibrated_hdr, calibrated_cube, dtype=np.float32, interleave="bil", metadata=meta, force=True
     )
 
     print(f"Calibrated cube saved to {calibrated_hdr}")
@@ -336,8 +338,10 @@ def white_dark_calibrate_from_rois(raw_hdr, white_roi, dark_roi, outdir):
     out_hdr = os.path.join(
         outdir, f"{os.path.basename(raw_hdr)[:-4]}_calibrated_roi.hdr"
     )
+    meta = spectral.open_image(raw_hdr).metadata
+    meta["description"] = f"Calibrated using ROIs - White: {white_roi}, Dark: {dark_roi} at {time.ctime()}"
     spectral.envi.save_image(
-        out_hdr, calibrated, dtype=np.float32, interleave="bil", force=True
+        out_hdr, calibrated, dtype=np.float32, interleave="bil", force=True, metadata=meta
     )
     print(f"Calibrated cube saved to {out_hdr}")
     return calibrated

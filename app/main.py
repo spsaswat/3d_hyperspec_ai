@@ -2,6 +2,8 @@ import sys
 import os
 import numpy as np
 import matplotlib.pyplot as plt
+import time
+import spectral
 from PyQt5.QtWidgets import (
     QApplication,
     QWidget,
@@ -9,10 +11,12 @@ from PyQt5.QtWidgets import (
     QLabel,
     QFileDialog,
     QVBoxLayout,
+    QHBoxLayout,
     QRadioButton,
     QGroupBox,
     QMessageBox,
     QTextEdit,
+    QDialog,
 )
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
@@ -25,6 +29,7 @@ from preprocessing.calibration import (
     normalize_image,
 )
 from preprocessing.background_removal import remove_background
+from preprocessing.reflectance_plot import plot_reflectance
 
 
 class CalibrationWorker(QThread):
@@ -98,6 +103,56 @@ class CalibrationWorkerROI(QThread):
         self.output.emit("Calibration done ✔\n")
 
 
+class AnalysisDialog(QDialog):
+    """Dialog for selecting wavelength range for analysis."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Select Wavelength Range")
+        self.setModal(True)
+        self.wavelength_mode = None
+
+        layout = QVBoxLayout()
+
+        # Add label
+        label = QLabel("Select wavelength range for reflectance analysis:")
+        layout.addWidget(label)
+
+        # Radio buttons for wavelength options
+        self.full_wl = QRadioButton("Use full wavelength")
+        self.full_wl.setChecked(True)
+        self.range_900_1000 = QRadioButton("Use 900-1000 nm")
+
+        layout.addWidget(self.full_wl)
+        layout.addWidget(self.range_900_1000)
+
+        # Buttons
+        btn_layout = QHBoxLayout()
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+
+        btn_layout.addWidget(ok_btn)
+        btn_layout.addWidget(cancel_btn)
+        layout.addLayout(btn_layout)
+
+        self.setLayout(layout)
+
+    def get_wavelength_range(self):
+        """
+        Get the selected wavelength range.
+
+        Returns:
+        - tuple: (start_wl, stop_wl) or (None, None) for full wavelength
+        """
+        if self.full_wl.isChecked():
+            return (None, None)
+        else:
+            return (900, 1000)
+
+
 class CalibApp(QWidget):
     def __init__(self):
         super().__init__()
@@ -133,6 +188,7 @@ class CalibApp(QWidget):
         self.btn_remove_bg = QPushButton("Remove plant background")
         self.btn_save_calib = QPushButton("Save calibrated image")
         self.btn_save_bg_removal = QPushButton("Save background-removed image")
+        self.btn_analyze = QPushButton("Analyze")
 
         self.btn_raw.clicked.connect(lambda: self.select_file("raw"))
         self.btn_run.clicked.connect(self.run_calibration)
@@ -144,6 +200,7 @@ class CalibApp(QWidget):
         self.btn_save_calib.setEnabled(False)
         self.btn_save_bg_removal.setEnabled(False)
         self.btn_remove_bg.setEnabled(False)
+        self.btn_analyze.clicked.connect(self.analyze_reflectance)
 
         layout.addWidget(cam_group)
         layout.addWidget(self.btn_raw)
@@ -152,6 +209,7 @@ class CalibApp(QWidget):
         layout.addWidget(self.btn_remove_bg)
         layout.addWidget(self.btn_save_bg_removal)
        
+        layout.addWidget(self.btn_analyze)
 
         # Output text display
         self.output_text = QTextEdit()
@@ -416,6 +474,7 @@ class CalibApp(QWidget):
             raw_basename = os.path.basename(self.raw_hdr)[:-4]
             out_hdr = os.path.join(output_dir, f"{raw_basename}_calibrated.hdr")
             meta = self.calibrated_image.metadata.copy() if hasattr(self.calibrated_image, 'metadata') else {}
+            #fix 1
             spectral.envi.save_image(
                 out_hdr,
                 self.calibrated_image,
@@ -453,6 +512,7 @@ class CalibApp(QWidget):
             out_hdr = os.path.join(output_dir, f"{raw_basename}_no_background.hdr")
 
             meta = self.plant_only.metadata.copy() if hasattr(self.plant_only, 'metadata') else {}
+            #fix 2
             spectral.envi.save_image(
                 out_hdr,
                 self.plant_only,
@@ -534,6 +594,39 @@ class CalibApp(QWidget):
             QMessageBox.warning(
                 self, "Display Error", f"Failed to display results: {str(e)}"
             )
+
+    def analyze_reflectance(self):
+        """
+        Open wavelength selection dialog and plot reflectance spectrum.
+        """
+        # Show wavelength selection dialog
+        dialog = AnalysisDialog(self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+
+        start_wl, stop_wl = dialog.get_wavelength_range()
+
+        # Prompt user to select no-background HDR file
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select no-background HDR file",
+            "",
+            "HDR Files (*.hdr)",
+        )
+
+        if not file_path:
+            self.append_output("Analysis cancelled: No file selected")
+            return
+
+        try:
+            self.append_output("Plotting reflectance spectrum...")
+            fig = plot_reflectance(file_path, start_wl, stop_wl)
+            plt.show()
+            self.append_output("Reflectance analysis complete ✔")
+        except Exception as e:
+            error_msg = f"Failed to analyze reflectance: {str(e)}"
+            self.append_output(f"ERROR: {error_msg}")
+            QMessageBox.warning(self, "Analysis Error", error_msg)
 
 
 if __name__ == "__main__":
