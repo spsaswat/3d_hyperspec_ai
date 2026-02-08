@@ -373,9 +373,9 @@ class CalibApp(QWidget):
             out_hdr = os.path.join(no_bg_dir, f"{raw_basename}_no_background.hdr")
 
             import spectral
-
+            meta = plant_only.metadata.copy() if hasattr(plant_only, "metadata") else {}
             spectral.envi.save_image(
-                out_hdr, plant_only, dtype=np.float32, interleave="bil", force=True
+                out_hdr, plant_only, dtype=np.float32, interleave="bil", force=True, metadata=meta
             )
             self.append_output(f"Background-removed image saved to {out_hdr}")
 

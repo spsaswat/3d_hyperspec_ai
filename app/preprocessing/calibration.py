@@ -336,8 +336,9 @@ def white_dark_calibrate_from_rois(raw_hdr, white_roi, dark_roi, outdir):
     out_hdr = os.path.join(
         outdir, f"{os.path.basename(raw_hdr)[:-4]}_calibrated_roi.hdr"
     )
+    meta = calibrated.metadata.copy() if hasattr(calibrated, "metadata") else {}
     spectral.envi.save_image(
-        out_hdr, calibrated, dtype=np.float32, interleave="bil", force=True
+        out_hdr, calibrated, dtype=np.float32, interleave="bil", force=True, metadata=meta
     )
     print(f"Calibrated cube saved to {out_hdr}")
     return calibrated
