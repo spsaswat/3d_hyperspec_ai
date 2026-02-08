@@ -51,7 +51,6 @@ class CalibrationWorker(QThread):
         wavelengths = [float(w) for w in wavelengths] if wavelengths else []
 
         self.image_ready.emit(calibrated, wavelengths)
-        self.status.emit("Calibration done ✔")
         self.output.emit("Calibration done ✔\n")
 
 
@@ -96,7 +95,6 @@ class CalibrationWorkerROI(QThread):
         wavelengths = [float(w) for w in wavelengths] if wavelengths else []
 
         self.image_ready.emit(calibrated, wavelengths)
-        self.status.emit("Calibration done ✔")
         self.output.emit("Calibration done ✔\n")
 
 
@@ -112,6 +110,10 @@ class CalibApp(QWidget):
         self.dark_roi = [(165, 2091), (900, 2091), (900, 2100), (165, 2100)]
         self.calibrated_image = None
         self.calibrated_wavelengths = None
+        # For manual saving
+        self.plant_only = None
+        self.plant_mask = None
+        self.index_map = None
 
         layout = QVBoxLayout()
 
@@ -129,15 +131,27 @@ class CalibApp(QWidget):
         self.btn_raw = QPushButton("Select RAW cube (.hdr)")
         self.btn_run = QPushButton("Run calibration")
         self.btn_remove_bg = QPushButton("Remove plant background")
+        self.btn_save_calib = QPushButton("Save calibrated image")
+        self.btn_save_bg_removal = QPushButton("Save background-removed image")
 
         self.btn_raw.clicked.connect(lambda: self.select_file("raw"))
         self.btn_run.clicked.connect(self.run_calibration)
         self.btn_remove_bg.clicked.connect(self.remove_background)
+        self.btn_save_calib.clicked.connect(self.save_calibrated_image)
+        self.btn_save_bg_removal.clicked.connect(self.save_removed_background)
+        
+        # Disable save buttons until results are available
+        self.btn_save_calib.setEnabled(False)
+        self.btn_save_bg_removal.setEnabled(False)
+        self.btn_remove_bg.setEnabled(False)
 
         layout.addWidget(cam_group)
         layout.addWidget(self.btn_raw)
         layout.addWidget(self.btn_run)
+        layout.addWidget(self.btn_save_calib)
         layout.addWidget(self.btn_remove_bg)
+        layout.addWidget(self.btn_save_bg_removal)
+       
 
         # Output text display
         self.output_text = QTextEdit()
@@ -207,6 +221,7 @@ class CalibApp(QWidget):
         self.worker.output.connect(self.append_output)
         self.worker.start()
 
+        
     def display_calibrated_image(self, image, wavelengths):
         """
         Display the raw and calibrated hyperspectral images as RGB side by side.
@@ -320,7 +335,10 @@ class CalibApp(QWidget):
             error_msg = f"Failed to display image: {str(e)}\n{traceback.format_exc()}"
             self.append_output(f"ERROR: {error_msg}")
             QMessageBox.warning(self, "Display Error", error_msg)
-
+        
+        # Enable save button now that calibrated image is available
+        self.btn_save_calib.setEnabled(True)
+        self.btn_remove_bg.setEnabled(True)
     @staticmethod
     def resize_for_display_static(image, max_height=900):
         """
@@ -364,28 +382,94 @@ class CalibApp(QWidget):
                 self.camera_type,
             )
 
-            # Save the background-removed image
-            raw_dir = os.path.dirname(self.raw_hdr)
-            no_bg_dir = os.path.join(raw_dir, "no-background")
-            os.makedirs(no_bg_dir, exist_ok=True)
-
-            raw_basename = os.path.basename(self.raw_hdr)[:-4]
-            out_hdr = os.path.join(no_bg_dir, f"{raw_basename}_no_background.hdr")
-
-            import spectral
-
-            spectral.envi.save_image(
-                out_hdr, plant_only, dtype=np.float32, interleave="bil", force=True
-            )
-            self.append_output(f"Background-removed image saved to {out_hdr}")
+            # Store results for manual saving
+            self.plant_only = plant_only
+            self.plant_mask = plant_mask
+            self.index_map = index_map
 
             # Display the results
             self.display_removal_results(plant_only, plant_mask, index_map)
 
             self.append_output("Plant background removal complete ✔")
+            # Enable save button now that results are available
+            self.btn_save_bg_removal.setEnabled(True)
 
         except Exception as e:
             self.append_output(f"ERROR: Background removal failed: {str(e)}")
+
+    def save_calibrated_image(self):
+        """Save calibrated image to user-selected directory."""
+        if self.calibrated_image is None:
+            self.append_output("ERROR: No calibrated image available")
+            return
+
+        # Open directory selection dialog
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "Select directory to save calibrated image"
+        )
+        if not output_dir:
+            return
+
+        try:
+            import spectral
+
+            raw_basename = os.path.basename(self.raw_hdr)[:-4]
+            out_hdr = os.path.join(output_dir, f"{raw_basename}_calibrated.hdr")
+            meta = self.calibrated_image.metadata.copy() if hasattr(self.calibrated_image, 'metadata') else {}
+            spectral.envi.save_image(
+                out_hdr,
+                self.calibrated_image,
+                dtype=np.float32,
+                interleave="bil",
+                force=True,
+                metadata=meta
+            )
+            self.append_output(f"Calibrated image saved to {out_hdr}")
+            QMessageBox.information(
+                self, "Success", f"Calibrated image saved to:\n{out_hdr}"
+            )
+        except Exception as e:
+            error_msg = f"Failed to save calibrated image: {str(e)}"
+            self.append_output(f"ERROR: {error_msg}")
+            QMessageBox.warning(self, "Save Error", error_msg)
+
+    def save_removed_background(self):
+        """Save background-removed image to user-selected directory."""
+        if self.plant_only is None:
+            self.append_output("ERROR: No background-removed image available")
+            return
+
+        # Open directory selection dialog
+        output_dir = QFileDialog.getExistingDirectory(
+            self, "Select directory to save background-removed image"
+        )
+        if not output_dir:
+            return
+
+        try:
+            import spectral
+
+            raw_basename = os.path.basename(self.raw_hdr)[:-4]
+            out_hdr = os.path.join(output_dir, f"{raw_basename}_no_background.hdr")
+
+            meta = self.plant_only.metadata.copy() if hasattr(self.plant_only, 'metadata') else {}
+            spectral.envi.save_image(
+                out_hdr,
+                self.plant_only,
+                dtype=np.float32,
+                interleave="bil",
+                force=True,
+                metadata=meta
+
+            )
+            self.append_output(f"Background-removed image saved to {out_hdr}")
+            QMessageBox.information(
+                self, "Success", f"Background-removed image saved to:\n{out_hdr}"
+            )
+        except Exception as e:
+            error_msg = f"Failed to save background-removed image: {str(e)}"
+            self.append_output(f"ERROR: {error_msg}")
+            QMessageBox.warning(self, "Save Error", error_msg)
 
     def display_removal_results(self, plant_only, plant_mask, index_map):
         """
