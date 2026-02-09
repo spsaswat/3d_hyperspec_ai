@@ -335,13 +335,6 @@ def white_dark_calibrate_from_rois(raw_hdr, white_roi, dark_roi, outdir):
     )
     calibrated = np.clip(calibrated, 0, 1)
 
-    out_hdr = os.path.join(
-        outdir, f"{os.path.basename(raw_hdr)[:-4]}_calibrated_roi.hdr"
-    )
-    meta = spectral.open_image(raw_hdr).metadata
-    meta["description"] = f"Calibrated using ROIs - White: {white_roi}, Dark: {dark_roi} at {time.ctime()}"
-    spectral.envi.save_image(
-        out_hdr, calibrated, dtype=np.float32, interleave="bil", force=True, metadata=meta
-    )
-    print(f"Calibrated cube saved to {out_hdr}")
+    # Do not auto-save the ROI-calibrated cube here —
+    # let the caller (GUI) decide when/where to save the result.
     return calibrated

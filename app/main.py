@@ -199,6 +199,7 @@ class CalibApp(QWidget):
         # Disable save buttons until results are available
         self.btn_save_calib.setEnabled(False)
         self.btn_save_bg_removal.setEnabled(False)
+        self.btn_save_bg_removal.setEnabled(False)
         self.btn_remove_bg.setEnabled(False)
         self.btn_analyze.clicked.connect(self.analyze_reflectance)
 
@@ -451,9 +452,9 @@ class CalibApp(QWidget):
             self.append_output("Plant background removal complete ✔")
             # Enable save button now that results are available
             self.btn_save_bg_removal.setEnabled(True)
-
         except Exception as e:
             self.append_output(f"ERROR: Background removal failed: {str(e)}")
+
 
     def save_calibrated_image(self):
         """Save calibrated image to user-selected directory."""
