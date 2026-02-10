@@ -16,7 +16,6 @@ from PyQt5.QtWidgets import (
     QGroupBox,
     QMessageBox,
     QTextEdit,
-    QDialog,
 )
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
@@ -29,7 +28,8 @@ from preprocessing.calibration import (
     normalize_image,
 )
 from preprocessing.background_removal import remove_background
-from preprocessing.reflectance_plot import plot_reflectance
+# Analysis UI removed: reflectance plotting removed
+from analysis.window import AnalysisWindow
 
 
 class CalibrationWorker(QThread):
@@ -103,54 +103,7 @@ class CalibrationWorkerROI(QThread):
         self.output.emit("Calibration done ✔\n")
 
 
-class AnalysisDialog(QDialog):
-    """Dialog for selecting wavelength range for analysis."""
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Select Wavelength Range")
-        self.setModal(True)
-        self.wavelength_mode = None
-
-        layout = QVBoxLayout()
-
-        # Add label
-        label = QLabel("Select wavelength range for reflectance analysis:")
-        layout.addWidget(label)
-
-        # Radio buttons for wavelength options
-        self.full_wl = QRadioButton("Use full wavelength")
-        self.full_wl.setChecked(True)
-        self.range_900_1000 = QRadioButton("Use 900-1000 nm")
-
-        layout.addWidget(self.full_wl)
-        layout.addWidget(self.range_900_1000)
-
-        # Buttons
-        btn_layout = QHBoxLayout()
-        ok_btn = QPushButton("OK")
-        cancel_btn = QPushButton("Cancel")
-
-        ok_btn.clicked.connect(self.accept)
-        cancel_btn.clicked.connect(self.reject)
-
-        btn_layout.addWidget(ok_btn)
-        btn_layout.addWidget(cancel_btn)
-        layout.addLayout(btn_layout)
-
-        self.setLayout(layout)
-
-    def get_wavelength_range(self):
-        """
-        Get the selected wavelength range.
-
-        Returns:
-        - tuple: (start_wl, stop_wl) or (None, None) for full wavelength
-        """
-        if self.full_wl.isChecked():
-            return (None, None)
-        else:
-            return (900, 1000)
+# Analysis dialog and functions removed (not used in this simplified UI)
 
 
 class CalibApp(QWidget):
@@ -188,20 +141,20 @@ class CalibApp(QWidget):
         self.btn_remove_bg = QPushButton("Remove plant background")
         self.btn_save_calib = QPushButton("Save calibrated image")
         self.btn_save_bg_removal = QPushButton("Save background-removed image")
-        self.btn_analyze = QPushButton("Analyze")
 
         self.btn_raw.clicked.connect(lambda: self.select_file("raw"))
         self.btn_run.clicked.connect(self.run_calibration)
         self.btn_remove_bg.clicked.connect(self.remove_background)
         self.btn_save_calib.clicked.connect(self.save_calibrated_image)
         self.btn_save_bg_removal.clicked.connect(self.save_removed_background)
-        
         # Disable save buttons until results are available
         self.btn_save_calib.setEnabled(False)
         self.btn_save_bg_removal.setEnabled(False)
         self.btn_save_bg_removal.setEnabled(False)
         self.btn_remove_bg.setEnabled(False)
-        self.btn_analyze.clicked.connect(self.analyze_reflectance)
+        # Analyze button (launches separate analysis app)
+        self.btn_analyze = QPushButton("Analyze")
+        self.btn_analyze.clicked.connect(self.open_analysis_app)
 
         layout.addWidget(cam_group)
         layout.addWidget(self.btn_raw)
@@ -209,8 +162,8 @@ class CalibApp(QWidget):
         layout.addWidget(self.btn_save_calib)
         layout.addWidget(self.btn_remove_bg)
         layout.addWidget(self.btn_save_bg_removal)
-       
         layout.addWidget(self.btn_analyze)
+       
 
         # Output text display
         self.output_text = QTextEdit()
@@ -220,6 +173,35 @@ class CalibApp(QWidget):
 
         self.setLayout(layout)
         self.cam_fx10.toggled.connect(self.update_camera_type)
+
+    def open_analysis_app(self):
+        """Launch the analysis application window."""
+        try:
+            # Create a top-level analysis window (no parent) and keep a reference
+            if not hasattr(self, "analysis_window") or self.analysis_window is None:
+                self.analysis_window = AnalysisWindow()
+
+                # When the analysis window closes, re-enable the Analyze button
+                try:
+                    self.analysis_window.closed.connect(self._on_analysis_closed)
+                except Exception:
+                    pass
+
+            self.analysis_window.show()
+            self.analysis_window.raise_()
+            # Disable the analyze button while analysis window is open
+            self.btn_analyze.setEnabled(False)
+            self.append_output("Analysis window opened")
+        except Exception as e:
+            self.append_output(f"ERROR: Failed to open analysis window: {e}")
+
+    def _on_analysis_closed(self):
+        # Re-enable analyze button and clear reference
+        try:
+            self.btn_analyze.setEnabled(True)
+        except Exception:
+            pass
+        self.analysis_window = None
 
     def update_camera_type(self):
         """Update camera type based on radio button selection and load coordinates."""
@@ -597,39 +579,7 @@ class CalibApp(QWidget):
             QMessageBox.warning(
                 self, "Display Error", f"Failed to display results: {str(e)}"
             )
-
-    def analyze_reflectance(self):
-        """
-        Open wavelength selection dialog and plot reflectance spectrum.
-        """
-        # Show wavelength selection dialog
-        dialog = AnalysisDialog(self)
-        if dialog.exec_() != QDialog.Accepted:
-            return
-
-        start_wl, stop_wl = dialog.get_wavelength_range()
-
-        # Prompt user to select no-background HDR file
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select no-background HDR file",
-            "",
-            "HDR Files (*.hdr)",
-        )
-
-        if not file_path:
-            self.append_output("Analysis cancelled: No file selected")
-            return
-
-        try:
-            self.append_output("Plotting reflectance spectrum...")
-            fig = plot_reflectance(file_path, start_wl, stop_wl)
-            plt.show()
-            self.append_output("Reflectance analysis complete ✔")
-        except Exception as e:
-            error_msg = f"Failed to analyze reflectance: {str(e)}"
-            self.append_output(f"ERROR: {error_msg}")
-            QMessageBox.warning(self, "Analysis Error", error_msg)
+    
 
 
 if __name__ == "__main__":
