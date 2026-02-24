@@ -41,36 +41,33 @@ def cross_calibrate_and_plot(fx10_path, fx17_path, overlap=(900, 1000), overlap_
 
     # Prepare dense overlap grid
     s, e = overlap
-    ol_grid = fx17_wl[(fx17_wl >= s) & (fx17_wl <= e)]
-
-    # Interpolate spectra onto the overlap grid
+    # Dense overlap grid
+    ol_grid = np.linspace(s, e, overlap_grid_n)
+    
+    # Interpolate BOTH to same grid
     fx10_ol = np.interp(ol_grid, fx10_wl, fx10_spec)
-    fx17_ol = fx17_spec[(fx17_wl >= s) & (fx17_wl <= e)]
-
-    # Solve least-squares for a and b: a * fx17_ol + b ~= fx10_ol
+    fx17_ol = np.interp(ol_grid, fx17_wl, fx17_spec)
+    
+    # Fit a,b  (or fit gain-only)
     A = np.vstack([fx17_ol, np.ones_like(fx17_ol)]).T
     a, b = np.linalg.lstsq(A, fx10_ol, rcond=None)[0]
-
-    # Apply correction to full FX17 spectrum
-    fx17_corr_spec = a * fx17_spec + b
-
-    # Build combined continuous spectrum:
-    # - Use FX10 for wavelengths < overlap start
-    # - Use corrected FX17 for wavelengths >= overlap start
-    overlap_start = s
-
-    mask_fx10_before = fx10_wl < overlap_start
-    mask_fx17_after = fx17_wl >= overlap_start
-
-    combined_wl = np.concatenate([
-        fx10_wl[mask_fx10_before],
-        fx17_wl[mask_fx17_after]
-    ])
-    combined_spec = np.concatenate([
-        fx10_spec[mask_fx10_before],
-        fx17_corr_spec[mask_fx17_after]
-    ])
-
+    
+    fx17_corr_spec = np.clip(a * fx17_spec + b, 0, 1)
+    
+    # Build fused spectrum with BLENDING in overlap
+    # Regions
+    fx10_left_mask = fx10_wl < s
+    fx17_right_mask = fx17_wl > e
+    
+    # Overlap on common grid
+    fx10_ol2 = np.interp(ol_grid, fx10_wl, fx10_spec)
+    fx17_ol2 = np.interp(ol_grid, fx17_wl, fx17_corr_spec)
+    
+    w = (ol_grid - s) / (e - s)
+    fused_ol = (1 - w) * fx10_ol2 + w * fx17_ol2
+    
+    combined_wl = np.concatenate([fx10_wl[fx10_left_mask], ol_grid, fx17_wl[fx17_right_mask]])
+    combined_spec = np.concatenate([fx10_spec[fx10_left_mask], fused_ol, fx17_corr_spec[fx17_right_mask]])
     # Sort combined by wavelength (in case inputs are unordered)
     order = np.argsort(combined_wl)
     combined_wl = combined_wl[order]
