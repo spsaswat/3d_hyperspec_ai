@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import spectral
+import spectral 
 
 
 def cross_calibrate_and_plot(fx10_path, fx17_path, overlap=(900, 1000), overlap_grid_n=300):
@@ -87,20 +87,20 @@ def cross_calibrate_and_plot(fx10_path, fx17_path, overlap=(900, 1000), overlap_
     plt.tight_layout()
     plt.show()
 
-    return (combined_wl, combined_spec)
+    # return (combined_wl, combined_spec)
 
-    # return {
-    #     "fx10_wl": fx10_wl,
-    #     "fx10_spec": fx10_spec,
-    #     "fx17_wl": fx17_wl,
-    #     "fx17_spec": fx17_spec,
-    #     "fx17_corr_wl": fx17_wl,
-    #     "fx17_corr_spec": fx17_corr_spec,
-    #     "combined_wl": combined_wl,
-    #     "combined_spec": combined_spec,
-    #     "a": float(a),
-    #     "b": float(b),
-    # }
+    return {
+        "fx10_wl": fx10_wl,
+        "fx10_spec": fx10_spec,
+        "fx17_wl": fx17_wl,
+        "fx17_spec": fx17_spec,
+        "fx17_corr_wl": fx17_wl,
+        "fx17_corr_spec": fx17_corr_spec,
+        "combined_wl": combined_wl,
+        "combined_spec": combined_spec,
+        "a": float(a),
+        "b": float(b),
+    }
 
 
 if __name__ == "__main__":
