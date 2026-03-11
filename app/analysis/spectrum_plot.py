@@ -28,11 +28,13 @@ def cross_calibrate_and_plot(fx10_path, fx17_path, overlap=(900, 1000), overlap_
         mean_spec = np.nanmean(data, axis=(0, 1))
         wls = img.metadata.get("wavelength", None)
         if wls is None:
+            print("Warning: No wavelength info found in metadata. Using band indices as wavelengths.")
             wls = np.arange(mean_spec.size)
         else:
             try:
                 wls = np.array([float(w) for w in wls])
             except Exception:
+                print("Warning: Failed to convert wavelength info to float. Using band indices as wavelengths.")
                 wls = np.arange(mean_spec.size)
         return np.array(wls), np.array(mean_spec)
 
@@ -88,6 +90,11 @@ def cross_calibrate_and_plot(fx10_path, fx17_path, overlap=(900, 1000), overlap_
     plt.show()
 
     # return (combined_wl, combined_spec)
+    # print(fx17_corr_spec.shape)
+    # print(fx10_spec.shape)
+    # plt.imshow(fx17_corr_spec[:, :, 50], cmap='gray')
+    # plt.title("FX17 Corrected Band 50")
+    # plt.show()
 
     return {
         "fx10_wl": fx10_wl,
