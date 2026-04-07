@@ -101,11 +101,13 @@ class CalibrationWorkerROI(QThread):
                 destripe_strength=0.9,
                 destripe_min_gain=0.8,
                 destripe_max_gain=1.2,
-                apply_row_destriping=False,
+                # Horizontal stripe suppression is needed for FX17 only.
+                apply_row_destriping=is_swir,
                 row_destripe_smooth_window=181 if is_swir else 121,
-                row_destripe_strength=0.92 if is_swir else 0.55,
-                row_destripe_min_gain=0.85,
-                row_destripe_max_gain=1.15,
+                row_destripe_strength=0.78 if is_swir else 0.55,
+                row_destripe_min_gain=0.92 if is_swir else 0.85,
+                row_destripe_max_gain=1.08 if is_swir else 1.15,
+                row_destripe_background_percentile=88.0 if is_swir else 75.0,
             )
         finally:
             # Capture output and restore stdout
@@ -320,7 +322,7 @@ class CalibApp(QWidget):
 
     def display_calibrated_image(self, image, wavelengths):
         """
-        Display the raw and calibrated hyperspectral images as RGB side by side.
+        Display raw and calibrated previews using the selected calibration run.
 
         Parameters:
         - image (np.ndarray): The calibrated hyperspectral data cube.
@@ -352,8 +354,29 @@ class CalibApp(QWidget):
             # SWIR false-color visualization (avoid non-existent 450nm channel)
             return (1600.0, 1300.0, 1050.0)
 
+        def cube_to_rgb(cube, wavs):
+            if wavs and len(wavs) > 0:
+                targets = rgb_targets_from_wavelengths(wavs)
+                red_idx = int(find_nearest_band(wavs, targets[0]))
+                green_idx = int(find_nearest_band(wavs, targets[1]))
+                blue_idx = int(find_nearest_band(wavs, targets[2]))
+
+                r = np.squeeze(robust_normalize_band(cube[:, :, red_idx]))
+                g = np.squeeze(robust_normalize_band(cube[:, :, green_idx]))
+                b = np.squeeze(robust_normalize_band(cube[:, :, blue_idx]))
+                rgb = np.stack([r, g, b], axis=-1)
+            else:
+                r = np.squeeze(normalize_image(cube[:, :, 60].astype(float)))
+                g = np.squeeze(normalize_image(cube[:, :, 30].astype(float)))
+                b = np.squeeze(normalize_image(cube[:, :, 10].astype(float)))
+                rgb = np.stack([r, g, b], axis=-1)
+
+            rgb = np.squeeze(rgb)
+            rgb = np.nan_to_num(rgb, nan=0.0, posinf=1.0, neginf=0.0)
+            return np.clip(rgb, 0.0, 1.0)
+
         try:
-            # Load raw image for comparison
+            # Load raw image for side-by-side comparison only.
             import spectral
 
             raw_img_data = spectral.open_image(self.raw_hdr)
@@ -380,63 +403,19 @@ class CalibApp(QWidget):
             except (TypeError, ValueError):
                 raw_wavelengths = []
 
-            # Extract RGB from raw image
-            if raw_wavelengths and len(raw_wavelengths) > 0:
-                raw_targets = rgb_targets_from_wavelengths(raw_wavelengths)
-                red_idx = int(find_nearest_band(raw_wavelengths, raw_targets[0]))
-                green_idx = int(find_nearest_band(raw_wavelengths, raw_targets[1]))
-                blue_idx = int(find_nearest_band(raw_wavelengths, raw_targets[2]))
+            raw_rgb = cube_to_rgb(raw_image, raw_wavelengths)
+            calibrated_rgb = cube_to_rgb(image, wavelengths)
 
-                raw_r = np.squeeze(robust_normalize_band(raw_image[:, :, red_idx]))
-                raw_g = np.squeeze(robust_normalize_band(raw_image[:, :, green_idx]))
-                raw_b = np.squeeze(robust_normalize_band(raw_image[:, :, blue_idx]))
-                raw_rgb = np.stack([raw_r, raw_g, raw_b], axis=-1)
-            else:
-                # Fallback: use band indices
-                raw_r = np.squeeze(normalize_image(raw_image[:, :, 60].astype(float)))
-                raw_g = np.squeeze(normalize_image(raw_image[:, :, 30].astype(float)))
-                raw_b = np.squeeze(normalize_image(raw_image[:, :, 10].astype(float)))
-                raw_rgb = np.stack([raw_r, raw_g, raw_b], axis=-1)
-
-            # Extract RGB from calibrated image
-            if wavelengths and len(wavelengths) > 0:
-                cal_targets = rgb_targets_from_wavelengths(wavelengths)
-                red_band_index = int(find_nearest_band(wavelengths, cal_targets[0]))
-                green_band_index = int(find_nearest_band(wavelengths, cal_targets[1]))
-                blue_band_index = int(find_nearest_band(wavelengths, cal_targets[2]))
-
-                cal_r = np.squeeze(robust_normalize_band(image[:, :, red_band_index]))
-                cal_g = np.squeeze(robust_normalize_band(image[:, :, green_band_index]))
-                cal_b = np.squeeze(robust_normalize_band(image[:, :, blue_band_index]))
-                calibrated_rgb = np.stack([cal_r, cal_g, cal_b], axis=-1)
-            else:
-                # Fallback: use band indices
-                cal_r = np.squeeze(normalize_image(image[:, :, 60].astype(float)))
-                cal_g = np.squeeze(normalize_image(image[:, :, 30].astype(float)))
-                cal_b = np.squeeze(normalize_image(image[:, :, 10].astype(float)))
-                calibrated_rgb = np.stack([cal_r, cal_g, cal_b], axis=-1)
-
-            # Normalize both to [0, 1]
-            raw_rgb = np.squeeze(raw_rgb)
-            raw_rgb = np.nan_to_num(raw_rgb, nan=0.0, posinf=1.0, neginf=0.0)
-            raw_rgb = np.clip(raw_rgb, 0.0, 1.0)
-
-            calibrated_rgb = np.squeeze(calibrated_rgb)
-            calibrated_rgb = np.nan_to_num(
-                calibrated_rgb, nan=0.0, posinf=1.0, neginf=0.0
-            )
-            calibrated_rgb = np.clip(calibrated_rgb, 0.0, 1.0)
-
-            # Display side by side using matplotlib
-            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+            for ax in axes:
+                ax.axis("off")
 
             axes[0].imshow(raw_rgb)
-            axes[0].set_title("Before: Raw Image", fontsize=14, fontweight="bold")
-            axes[0].axis("off")
-
+            axes[0].set_title("Raw", fontsize=14, fontweight="bold")
             axes[1].imshow(calibrated_rgb)
-            axes[1].set_title("After: Calibrated Image", fontsize=14, fontweight="bold")
-            axes[1].axis("off")
+            axes[1].set_title(
+                "Calibrated (Row+Col Separable)", fontsize=14, fontweight="bold"
+            )
 
             plt.tight_layout()
             plt.show()

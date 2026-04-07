@@ -120,6 +120,7 @@ def _destripe_rows_with_white_roi(
     min_gain=0.85,
     max_gain=1.15,
     min_cols=64,
+    background_percentile=80.0,
 ):
     """Reduce row-wise striping using white ROI statistics after calibration."""
     if calibrated.ndim != 3:
@@ -143,7 +144,9 @@ def _destripe_rows_with_white_roi(
     if white_patch.size == 0:
         return calibrated
 
-    row_profile = np.median(white_patch, axis=1)  # (height, bands)
+    # Use high-percentile background statistics to avoid plant pixels driving row gains.
+    p = float(np.clip(background_percentile, 50.0, 99.5))
+    row_profile = np.percentile(white_patch, p, axis=1)  # (height, bands)
     corrected = calibrated.astype(np.float64, copy=True)
 
     for band_idx in range(b):
@@ -620,6 +623,7 @@ def white_dark_calibrate_from_rois(
     row_destripe_strength=0.9,
     row_destripe_min_gain=0.85,
     row_destripe_max_gain=1.15,
+    row_destripe_background_percentile=80.0,
 ):
     """
     Perform white-dark calibration on a hyperspectral image cube using specified ROIs.
@@ -646,6 +650,7 @@ def white_dark_calibrate_from_rois(
     - row_destripe_strength: Strength of applied row gain correction [0, 1]
     - row_destripe_min_gain: Minimum allowed row gain during destriping
     - row_destripe_max_gain: Maximum allowed row gain during destriping
+    - row_destripe_background_percentile: Percentile used to estimate row background (higher reduces plant leakage)
 
     Returns:
     - calibrated: The calibrated hyperspectral image cube
@@ -727,6 +732,7 @@ def white_dark_calibrate_from_rois(
             strength=row_destripe_strength,
             min_gain=row_destripe_min_gain,
             max_gain=row_destripe_max_gain,
+            background_percentile=row_destripe_background_percentile,
         )
 
     # Do not auto-save the ROI-calibrated cube here —
