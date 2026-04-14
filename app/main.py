@@ -23,6 +23,7 @@ import cv2
 from preprocessing.calibration import (
     white_dark_calibrate,
     white_dark_calibrate_from_rois,
+    destripe_cube_columns,
     select_coordinates,
     find_nearest_band,
     normalize_image,
@@ -63,12 +64,13 @@ class CalibrationWorkerROI(QThread):
     image_ready = pyqtSignal(np.ndarray, list)  # image and wavelengths
     output = pyqtSignal(str)  # for print output
 
-    def __init__(self, raw, white_roi, dark_roi, outdir):
+    def __init__(self, raw, white_roi, dark_roi, outdir, camera_type="fx10"):
         super().__init__()
         self.raw = raw
         self.white_roi = white_roi
         self.dark_roi = dark_roi
         self.outdir = outdir
+        self.camera_type = camera_type
 
     def run(self):
         import io
@@ -81,8 +83,31 @@ class CalibrationWorkerROI(QThread):
         sys.stdout = io.StringIO()
 
         try:
+            is_swir = self.camera_type == "fx17"
             calibrated = white_dark_calibrate_from_rois(
-                self.raw, self.white_roi, self.dark_roi, self.outdir
+                self.raw,
+                self.white_roi,
+                self.dark_roi,
+                self.outdir,
+                reference_method="row_col_separable",
+                smooth_window=31,
+                pre_destripe_raw=True,
+                pre_destripe_smooth_window=151,
+                pre_destripe_strength=0.85,
+                pre_destripe_min_gain=0.85,
+                pre_destripe_max_gain=1.15,
+                apply_column_destriping=True,
+                destripe_smooth_window=151,
+                destripe_strength=0.9,
+                destripe_min_gain=0.8,
+                destripe_max_gain=1.2,
+                # Horizontal stripe suppression is needed for FX17 only.
+                apply_row_destriping=is_swir,
+                row_destripe_smooth_window=181 if is_swir else 121,
+                row_destripe_strength=0.78 if is_swir else 0.55,
+                row_destripe_min_gain=0.92 if is_swir else 0.85,
+                row_destripe_max_gain=1.08 if is_swir else 1.15,
+                row_destripe_background_percentile=88.0 if is_swir else 75.0,
             )
         finally:
             # Capture output and restore stdout
@@ -164,7 +189,6 @@ class CalibApp(QWidget):
         # layout.addWidget(self.btn_remove_bg)
         # layout.addWidget(self.btn_save_bg_removal)
         # layout.addWidget(self.btn_analyze)
-       
 
         # --- Row 1: Run Calibration + Save Calibrated ---
         row1 = QHBoxLayout()
@@ -180,9 +204,8 @@ class CalibApp(QWidget):
         layout.addLayout(row1)
         layout.addLayout(row2)
 
-        # Analyze button below 
+        # Analyze button below
         layout.addWidget(self.btn_analyze)
-
 
         # Output text display
         self.output_text = QTextEdit()
@@ -285,7 +308,11 @@ class CalibApp(QWidget):
             return
 
         self.worker = CalibrationWorkerROI(
-            self.raw_hdr, self.white_roi, self.dark_roi, output_dir
+            self.raw_hdr,
+            self.white_roi,
+            self.dark_roi,
+            output_dir,
+            camera_type=self.camera_type,
         )
 
         self.worker.status.connect(self.append_output)
@@ -293,10 +320,9 @@ class CalibApp(QWidget):
         self.worker.output.connect(self.append_output)
         self.worker.start()
 
-        
     def display_calibrated_image(self, image, wavelengths):
         """
-        Display the raw and calibrated hyperspectral images as RGB side by side.
+        Display raw and calibrated previews using the selected calibration run.
 
         Parameters:
         - image (np.ndarray): The calibrated hyperspectral data cube.
@@ -309,13 +335,60 @@ class CalibApp(QWidget):
         self.calibrated_image = image
         self.calibrated_wavelengths = wavelengths
 
+        def robust_normalize_band(band, low=2.0, high=98.0):
+            band = np.asarray(band, dtype=float)
+            band = np.nan_to_num(band, nan=0.0, posinf=0.0, neginf=0.0)
+            lo, hi = np.percentile(band, [low, high])
+            if hi <= lo:
+                return np.zeros_like(band, dtype=float)
+            return np.clip((band - lo) / (hi - lo), 0.0, 1.0)
+
+        def rgb_targets_from_wavelengths(wavs):
+            if not wavs:
+                return None
+            wmin = float(min(wavs))
+            wmax = float(max(wavs))
+            # VNIR true-color-like visualization (FX10 can extend a little above 1000nm)
+            if wmin < 700 and wmax <= 1100:
+                return (660.0, 550.0, 470.0)
+            # SWIR false-color visualization (avoid non-existent 450nm channel)
+            return (1600.0, 1300.0, 1050.0)
+
+        def cube_to_rgb(cube, wavs):
+            if wavs and len(wavs) > 0:
+                targets = rgb_targets_from_wavelengths(wavs)
+                red_idx = int(find_nearest_band(wavs, targets[0]))
+                green_idx = int(find_nearest_band(wavs, targets[1]))
+                blue_idx = int(find_nearest_band(wavs, targets[2]))
+
+                r = np.squeeze(robust_normalize_band(cube[:, :, red_idx]))
+                g = np.squeeze(robust_normalize_band(cube[:, :, green_idx]))
+                b = np.squeeze(robust_normalize_band(cube[:, :, blue_idx]))
+                rgb = np.stack([r, g, b], axis=-1)
+            else:
+                r = np.squeeze(normalize_image(cube[:, :, 60].astype(float)))
+                g = np.squeeze(normalize_image(cube[:, :, 30].astype(float)))
+                b = np.squeeze(normalize_image(cube[:, :, 10].astype(float)))
+                rgb = np.stack([r, g, b], axis=-1)
+
+            rgb = np.squeeze(rgb)
+            rgb = np.nan_to_num(rgb, nan=0.0, posinf=1.0, neginf=0.0)
+            return np.clip(rgb, 0.0, 1.0)
+
         try:
-            # Load raw image for comparison
+            # Load raw image for side-by-side comparison only.
             import spectral
 
             raw_img_data = spectral.open_image(self.raw_hdr)
             # Use .load() to get the full array instead of slicing
             raw_image = raw_img_data.load()
+            raw_image = destripe_cube_columns(
+                raw_image,
+                smooth_window=151,
+                strength=0.85,
+                min_gain=0.85,
+                max_gain=1.15,
+            )
 
             # Safely extract wavelengths from metadata
             raw_wavelengths = []
@@ -330,73 +403,19 @@ class CalibApp(QWidget):
             except (TypeError, ValueError):
                 raw_wavelengths = []
 
-            # Extract RGB from raw image
-            if raw_wavelengths and len(raw_wavelengths) > 0:
-                red_idx = int(find_nearest_band(raw_wavelengths, 660))
-                green_idx = int(find_nearest_band(raw_wavelengths, 550))
-                blue_idx = int(find_nearest_band(raw_wavelengths, 450))
+            raw_rgb = cube_to_rgb(raw_image, raw_wavelengths)
+            calibrated_rgb = cube_to_rgb(image, wavelengths)
 
-                raw_r = np.squeeze(
-                    normalize_image(raw_image[:, :, red_idx].astype(float))
-                )
-                raw_g = np.squeeze(
-                    normalize_image(raw_image[:, :, green_idx].astype(float))
-                )
-                raw_b = np.squeeze(
-                    normalize_image(raw_image[:, :, blue_idx].astype(float))
-                )
-                raw_rgb = np.stack([raw_r, raw_g, raw_b], axis=-1)
-            else:
-                # Fallback: use band indices
-                raw_r = np.squeeze(normalize_image(raw_image[:, :, 60].astype(float)))
-                raw_g = np.squeeze(normalize_image(raw_image[:, :, 30].astype(float)))
-                raw_b = np.squeeze(normalize_image(raw_image[:, :, 10].astype(float)))
-                raw_rgb = np.stack([raw_r, raw_g, raw_b], axis=-1)
-
-            # Extract RGB from calibrated image
-            if wavelengths and len(wavelengths) > 0:
-                red_band_index = int(find_nearest_band(wavelengths, 660))
-                green_band_index = int(find_nearest_band(wavelengths, 550))
-                blue_band_index = int(find_nearest_band(wavelengths, 450))
-
-                cal_r = np.squeeze(
-                    normalize_image(image[:, :, red_band_index].astype(float))
-                )
-                cal_g = np.squeeze(
-                    normalize_image(image[:, :, green_band_index].astype(float))
-                )
-                cal_b = np.squeeze(
-                    normalize_image(image[:, :, blue_band_index].astype(float))
-                )
-                calibrated_rgb = np.stack([cal_r, cal_g, cal_b], axis=-1)
-            else:
-                # Fallback: use band indices
-                cal_r = np.squeeze(normalize_image(image[:, :, 60].astype(float)))
-                cal_g = np.squeeze(normalize_image(image[:, :, 30].astype(float)))
-                cal_b = np.squeeze(normalize_image(image[:, :, 10].astype(float)))
-                calibrated_rgb = np.stack([cal_r, cal_g, cal_b], axis=-1)
-
-            # Normalize both to [0, 1]
-            raw_rgb = np.squeeze(raw_rgb)
-            raw_rgb = np.nan_to_num(raw_rgb, nan=0.0, posinf=1.0, neginf=0.0)
-            raw_rgb = np.clip(raw_rgb, 0.0, 1.0)
-
-            calibrated_rgb = np.squeeze(calibrated_rgb)
-            calibrated_rgb = np.nan_to_num(
-                calibrated_rgb, nan=0.0, posinf=1.0, neginf=0.0
-            )
-            calibrated_rgb = np.clip(calibrated_rgb, 0.0, 1.0)
-
-            # Display side by side using matplotlib
-            fig, axes = plt.subplots(1, 2, figsize=(14, 6))
+            fig, axes = plt.subplots(1, 2, figsize=(16, 7))
+            for ax in axes:
+                ax.axis("off")
 
             axes[0].imshow(raw_rgb)
-            axes[0].set_title("Before: Raw Image", fontsize=14, fontweight="bold")
-            axes[0].axis("off")
-
+            axes[0].set_title("Raw", fontsize=14, fontweight="bold")
             axes[1].imshow(calibrated_rgb)
-            axes[1].set_title("After: Calibrated Image", fontsize=14, fontweight="bold")
-            axes[1].axis("off")
+            axes[1].set_title(
+                "Calibrated (Row+Col Separable)", fontsize=14, fontweight="bold"
+            )
 
             plt.tight_layout()
             plt.show()
@@ -407,10 +426,11 @@ class CalibApp(QWidget):
             error_msg = f"Failed to display image: {str(e)}\n{traceback.format_exc()}"
             self.append_output(f"ERROR: {error_msg}")
             QMessageBox.warning(self, "Display Error", error_msg)
-        
+
         # Enable save button now that calibrated image is available
         self.btn_save_calib.setEnabled(True)
         self.btn_remove_bg.setEnabled(True)
+
     @staticmethod
     def resize_for_display_static(image, max_height=900):
         """
@@ -468,7 +488,6 @@ class CalibApp(QWidget):
         except Exception as e:
             self.append_output(f"ERROR: Background removal failed: {str(e)}")
 
-
     def save_calibrated_image(self):
         """Save calibrated image to user-selected directory."""
         if self.calibrated_image is None:
@@ -489,14 +508,14 @@ class CalibApp(QWidget):
             out_hdr = os.path.join(output_dir, f"{raw_basename}_calibrated.hdr")
             meta = spectral.open_image(self.raw_hdr).metadata
             meta["description"] = f"Calibrated using ROIs at {time.ctime()}"
-            #fix 1
+            # fix 1
             spectral.envi.save_image(
                 out_hdr,
                 self.calibrated_image,
                 dtype=np.float32,
                 interleave="bil",
                 force=True,
-                metadata=meta
+                metadata=meta,
             )
             self.append_output(f"Calibrated image saved to {out_hdr}")
             QMessageBox.information(
@@ -528,15 +547,14 @@ class CalibApp(QWidget):
 
             meta = spectral.open_image(self.raw_hdr).metadata
             meta["description"] = f"Background removed using method at {time.ctime()}"
-            #fix 2
+            # fix 2
             spectral.envi.save_image(
                 out_hdr,
                 self.plant_only,
                 dtype=np.float32,
                 interleave="bil",
                 force=True,
-                metadata=meta
-
+                metadata=meta,
             )
             self.append_output(f"Background-removed image saved to {out_hdr}")
             QMessageBox.information(
@@ -610,6 +628,7 @@ class CalibApp(QWidget):
             QMessageBox.warning(
                 self, "Display Error", f"Failed to display results: {str(e)}"
             )
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

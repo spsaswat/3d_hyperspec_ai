@@ -5,6 +5,311 @@ import time
 import os
 
 
+def _extract_calibration_region(image, coordinates):
+    """Extract calibration ROI with bounds checks."""
+    rows_range = (int(coordinates[0, 1]), int(coordinates[2, 1]))  # Top to Bottom
+    cols_range = (int(coordinates[0, 0]), int(coordinates[1, 0]))  # Left to Right
+
+    rows_range = (max(0, rows_range[0]), min(image.shape[0], rows_range[1]))
+    cols_range = (max(0, cols_range[0]), min(image.shape[1], cols_range[1]))
+
+    region = image[rows_range[0] : rows_range[1], cols_range[0] : cols_range[1], :]
+    if region.size == 0:
+        raise ValueError("Calibration ROI is empty after bounds checking")
+    return region
+
+
+def _smooth_row_profiles(row_profiles, smooth_window=9):
+    """Smooth per-row spectra using an edge-padded moving average."""
+    if smooth_window <= 1 or row_profiles.shape[0] < 3:
+        return row_profiles
+
+    smooth_window = int(smooth_window)
+    if smooth_window % 2 == 0:
+        smooth_window += 1
+    smooth_window = min(smooth_window, row_profiles.shape[0])
+    if smooth_window % 2 == 0:
+        smooth_window -= 1
+    if smooth_window <= 1:
+        return row_profiles
+
+    kernel = np.ones(smooth_window, dtype=np.float64) / smooth_window
+    pad = smooth_window // 2
+    padded = np.pad(row_profiles, ((pad, pad), (0, 0)), mode="edge")
+    smoothed = np.apply_along_axis(
+        lambda col: np.convolve(col, kernel, mode="valid"),
+        axis=0,
+        arr=padded,
+    )
+    return smoothed
+
+
+def _smooth_1d_profile(profile, smooth_window=9):
+    """Smooth a 1D profile with an edge-padded moving average."""
+    if smooth_window <= 1 or profile.shape[0] < 3:
+        return profile
+
+    smooth_window = int(smooth_window)
+    if smooth_window % 2 == 0:
+        smooth_window += 1
+    smooth_window = min(smooth_window, profile.shape[0])
+    if smooth_window % 2 == 0:
+        smooth_window -= 1
+    if smooth_window <= 1:
+        return profile
+
+    kernel = np.ones(smooth_window, dtype=np.float64) / smooth_window
+    pad = smooth_window // 2
+    padded = np.pad(profile, (pad, pad), mode="edge")
+    return np.convolve(padded, kernel, mode="valid")
+
+
+def _destripe_columns_with_white_roi(
+    calibrated,
+    white_relative_coordinates,
+    smooth_window=151,
+    strength=0.9,
+    min_gain=0.8,
+    max_gain=1.2,
+    min_rows=32,
+):
+    """Reduce column-wise striping using white ROI statistics after calibration."""
+    if calibrated.ndim != 3:
+        return calibrated
+
+    h, _, b = calibrated.shape
+    row_start = max(0, min(h - 1, int(white_relative_coordinates[0, 1])))
+    row_end = max(0, min(h, int(white_relative_coordinates[2, 1])))
+    if row_end <= row_start:
+        row_end = min(h, row_start + 1)
+
+    current_rows = row_end - row_start
+    if current_rows < min_rows:
+        center = (row_start + row_end) // 2
+        half = min_rows // 2
+        row_start = max(0, center - half)
+        row_end = min(h, row_start + min_rows)
+        row_start = max(0, row_end - min_rows)
+
+    white_patch = calibrated[row_start:row_end, :, :].astype(np.float64, copy=False)
+    if white_patch.size == 0:
+        return calibrated
+
+    col_profile = np.median(white_patch, axis=0)  # (width, bands)
+    corrected = calibrated.astype(np.float64, copy=True)
+
+    for band_idx in range(b):
+        raw_col = col_profile[:, band_idx]
+        smooth_col = _smooth_1d_profile(raw_col, smooth_window=smooth_window)
+
+        gain = smooth_col / (raw_col + 1e-8)
+        gain = 1.0 + strength * (gain - 1.0)
+        gain = np.clip(gain, min_gain, max_gain)
+
+        corrected[:, :, band_idx] *= gain[np.newaxis, :]
+
+    corrected = np.clip(corrected, 0, 1)
+    return corrected.astype(calibrated.dtype, copy=False)
+
+
+def _destripe_rows_with_white_roi(
+    calibrated,
+    white_relative_coordinates,
+    smooth_window=181,
+    strength=0.9,
+    min_gain=0.85,
+    max_gain=1.15,
+    min_cols=64,
+    background_percentile=80.0,
+):
+    """Reduce row-wise striping using white ROI statistics after calibration."""
+    if calibrated.ndim != 3:
+        return calibrated
+
+    h, w, b = calibrated.shape
+    col_start = max(0, min(w - 1, int(white_relative_coordinates[0, 0])))
+    col_end = max(0, min(w, int(white_relative_coordinates[1, 0])))
+    if col_end <= col_start:
+        col_end = min(w, col_start + 1)
+
+    current_cols = col_end - col_start
+    if current_cols < min_cols:
+        center = (col_start + col_end) // 2
+        half = min_cols // 2
+        col_start = max(0, center - half)
+        col_end = min(w, col_start + min_cols)
+        col_start = max(0, col_end - min_cols)
+
+    white_patch = calibrated[:, col_start:col_end, :].astype(np.float64, copy=False)
+    if white_patch.size == 0:
+        return calibrated
+
+    # Use high-percentile background statistics to avoid plant pixels driving row gains.
+    p = float(np.clip(background_percentile, 50.0, 99.5))
+    row_profile = np.percentile(white_patch, p, axis=1)  # (height, bands)
+    corrected = calibrated.astype(np.float64, copy=True)
+
+    for band_idx in range(b):
+        raw_row = row_profile[:, band_idx]
+        smooth_row = _smooth_1d_profile(raw_row, smooth_window=smooth_window)
+
+        gain = smooth_row / (raw_row + 1e-8)
+        gain = 1.0 + strength * (gain - 1.0)
+        gain = np.clip(gain, min_gain, max_gain)
+
+        corrected[:, :, band_idx] *= gain[:, np.newaxis]
+
+    corrected = np.clip(corrected, 0, 1)
+    return corrected.astype(calibrated.dtype, copy=False)
+
+
+def destripe_cube_columns(
+    cube,
+    reference_rows=None,
+    smooth_window=151,
+    strength=0.85,
+    min_gain=0.85,
+    max_gain=1.15,
+    min_rows=32,
+):
+    """Destripe a raw/calibrated cube by correcting column gain per band."""
+    if cube.ndim != 3:
+        return cube
+
+    h, _, b = cube.shape
+    if reference_rows is None:
+        patch = cube
+    else:
+        row_start = max(0, min(h - 1, int(reference_rows[0])))
+        row_end = max(0, min(h, int(reference_rows[1])))
+        if row_end <= row_start:
+            row_end = min(h, row_start + 1)
+
+        current_rows = row_end - row_start
+        if current_rows < min_rows:
+            center = (row_start + row_end) // 2
+            half = min_rows // 2
+            row_start = max(0, center - half)
+            row_end = min(h, row_start + min_rows)
+            row_start = max(0, row_end - min_rows)
+
+        patch = cube[row_start:row_end, :, :]
+
+    patch = patch.astype(np.float64, copy=False)
+    if patch.size == 0:
+        return cube
+
+    col_profile = np.median(patch, axis=0)  # (width, bands)
+    corrected = cube.astype(np.float64, copy=True)
+
+    for band_idx in range(b):
+        raw_col = col_profile[:, band_idx]
+        smooth_col = _smooth_1d_profile(raw_col, smooth_window=smooth_window)
+        gain = smooth_col / (raw_col + 1e-8)
+        gain = 1.0 + strength * (gain - 1.0)
+        gain = np.clip(gain, min_gain, max_gain)
+        corrected[:, :, band_idx] *= gain[np.newaxis, :]
+
+    return corrected.astype(cube.dtype, copy=False)
+
+
+def build_reference_from_roi(
+    image,
+    coordinates,
+    target_shape,
+    method="row_mean",
+    smooth_window=9,
+):
+    """
+    Build a full-size calibration reference from ROI using a configurable strategy.
+
+    Methods:
+    - replicate: Legacy vertical tiling of ROI (kept for comparison/backward compatibility)
+    - row_mean: Mean spectrum over ROI, broadcast over full image
+    - row_interp_smooth: Mean ROI spectrum per row, smoothed + interpolated over image rows
+    - row_col_separable: Smoothed row and column profiles combined per band
+    """
+    if method == "replicate":
+        return replicate_and_extend(image, coordinates, target_shape)
+
+    region = _extract_calibration_region(image, coordinates).astype(
+        np.float64, copy=False
+    )
+    target_h, target_w, target_b = target_shape
+
+    if method == "row_mean":
+        mean_spectrum = np.mean(region, axis=(0, 1), dtype=np.float64)
+        reference = np.broadcast_to(mean_spectrum.reshape(1, 1, -1), target_shape)
+        return reference.astype(image.dtype, copy=False)
+
+    if method == "row_interp_smooth":
+        row_profiles = np.mean(region, axis=1, dtype=np.float64)  # (roi_h, bands)
+        row_profiles = _smooth_row_profiles(row_profiles, smooth_window=smooth_window)
+
+        if row_profiles.shape[0] == 1:
+            interp_rows = np.repeat(row_profiles, target_h, axis=0)
+        else:
+            src_y = np.linspace(0, target_h - 1, row_profiles.shape[0])
+            tgt_y = np.arange(target_h)
+            interp_rows = np.empty((target_h, target_b), dtype=np.float64)
+            for band_idx in range(target_b):
+                interp_rows[:, band_idx] = np.interp(
+                    tgt_y, src_y, row_profiles[:, band_idx]
+                )
+
+        reference = np.broadcast_to(
+            interp_rows[:, np.newaxis, :], (target_h, target_w, target_b)
+        )
+        return reference.astype(image.dtype, copy=False)
+
+    if method == "row_col_separable":
+        # Separable model preserves detector column response and scan-line illumination.
+        row_profiles = np.mean(region, axis=1, dtype=np.float64)  # (roi_h, bands)
+        col_profiles = np.mean(region, axis=0, dtype=np.float64)  # (roi_w, bands)
+
+        row_profiles = _smooth_row_profiles(row_profiles, smooth_window=smooth_window)
+
+        interp_rows = np.empty((target_h, target_b), dtype=np.float64)
+        if row_profiles.shape[0] == 1:
+            interp_rows[:] = row_profiles[0]
+        else:
+            src_y = np.linspace(0, target_h - 1, row_profiles.shape[0])
+            tgt_y = np.arange(target_h)
+            for band_idx in range(target_b):
+                interp_rows[:, band_idx] = np.interp(
+                    tgt_y, src_y, row_profiles[:, band_idx]
+                )
+
+        interp_cols = np.empty((target_w, target_b), dtype=np.float64)
+        if col_profiles.shape[0] == 1:
+            interp_cols[:] = col_profiles[0]
+        else:
+            src_x = np.linspace(0, target_w - 1, col_profiles.shape[0])
+            tgt_x = np.arange(target_w)
+            for band_idx in range(target_b):
+                smoothed_col = _smooth_1d_profile(
+                    col_profiles[:, band_idx], smooth_window=smooth_window
+                )
+                interp_cols[:, band_idx] = np.interp(tgt_x, src_x, smoothed_col)
+
+        row_mean = np.mean(interp_rows, axis=0)
+        col_mean = np.mean(interp_cols, axis=0)
+        gain = np.where(col_mean == 0, 1.0, row_mean / (col_mean + 1e-12))
+        interp_cols *= gain[np.newaxis, :]
+
+        reference = (
+            interp_rows[:, np.newaxis, :]
+            + interp_cols[np.newaxis, :, :]
+            - row_mean[np.newaxis, np.newaxis, :]
+        )
+        reference = np.clip(reference, 0, None)
+        return reference.astype(image.dtype, copy=False)
+
+    raise ValueError(
+        f"Unknown reference method '{method}'. Use 'replicate', 'row_mean', 'row_interp_smooth', or 'row_col_separable'."
+    )
+
+
 def find_nearest_band(wavelengths, target_wavelength):
     """
     Find the index of the band with the wavelength closest to the target wavelength.
@@ -284,14 +589,42 @@ def white_dark_calibrate(raw_hdr, white_hdr, dark_hdr, outdir):
     meta = spectral.open_image(raw_hdr).metadata
     meta["description"] = f"Calibrated using ROIs at {time.ctime()}"
     spectral.envi.save_image(
-        calibrated_hdr, calibrated_cube, dtype=np.float32, interleave="bil", metadata=meta, force=True
+        calibrated_hdr,
+        calibrated_cube,
+        dtype=np.float32,
+        interleave="bil",
+        metadata=meta,
+        force=True,
     )
 
     print(f"Calibrated cube saved to {calibrated_hdr}")
     return calibrated_cube
 
 
-def white_dark_calibrate_from_rois(raw_hdr, white_roi, dark_roi, outdir):
+def white_dark_calibrate_from_rois(
+    raw_hdr,
+    white_roi,
+    dark_roi,
+    outdir,
+    reference_method="row_col_separable",
+    smooth_window=9,
+    pre_destripe_raw=True,
+    pre_destripe_smooth_window=151,
+    pre_destripe_strength=0.85,
+    pre_destripe_min_gain=0.85,
+    pre_destripe_max_gain=1.15,
+    apply_column_destriping=True,
+    destripe_smooth_window=151,
+    destripe_strength=0.9,
+    destripe_min_gain=0.8,
+    destripe_max_gain=1.2,
+    apply_row_destriping=False,
+    row_destripe_smooth_window=181,
+    row_destripe_strength=0.9,
+    row_destripe_min_gain=0.85,
+    row_destripe_max_gain=1.15,
+    row_destripe_background_percentile=80.0,
+):
     """
     Perform white-dark calibration on a hyperspectral image cube using specified ROIs.
 
@@ -300,6 +633,24 @@ def white_dark_calibrate_from_rois(raw_hdr, white_roi, dark_roi, outdir):
     - white_roi: List of corner coordinates [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
     - dark_roi: List of corner coordinates [(x1,y1), (x2,y2), (x3,y3), (x4,y4)]
     - outdir: Directory to save the calibrated output cube
+    - reference_method: ROI reference construction strategy ('replicate', 'row_mean', 'row_interp_smooth', 'row_col_separable')
+    - smooth_window: Row smoothing window when using row_interp_smooth
+    - pre_destripe_raw: Enable column destriping on raw cropped cube before calibration
+    - pre_destripe_smooth_window: Column smoothing window for pre-calibration destriping
+    - pre_destripe_strength: Strength of pre-calibration gain correction [0, 1]
+    - pre_destripe_min_gain: Minimum allowed gain for pre-calibration destriping
+    - pre_destripe_max_gain: Maximum allowed gain for pre-calibration destriping
+    - apply_column_destriping: Enable post-calibration white-ROI-based column correction
+    - destripe_smooth_window: Column smoothing window for destriping profile
+    - destripe_strength: Strength of applied gain correction [0, 1]
+    - destripe_min_gain: Minimum allowed column gain during destriping
+    - destripe_max_gain: Maximum allowed column gain during destriping
+    - apply_row_destriping: Enable post-calibration row-wise stripe correction (off by default; can amplify scene texture)
+    - row_destripe_smooth_window: Row smoothing window for row destriping profile
+    - row_destripe_strength: Strength of applied row gain correction [0, 1]
+    - row_destripe_min_gain: Minimum allowed row gain during destriping
+    - row_destripe_max_gain: Maximum allowed row gain during destriping
+    - row_destripe_background_percentile: Percentile used to estimate row background (higher reduces plant leakage)
 
     Returns:
     - calibrated: The calibrated hyperspectral image cube
@@ -317,11 +668,33 @@ def white_dark_calibrate_from_rois(raw_hdr, white_roi, dark_roi, outdir):
         )
     )
 
-    white_calibration_reference = replicate_and_extend(
-        cropped, white_calibration_relative_coordinates, cropped.shape
+    if pre_destripe_raw:
+        white_rows = (
+            int(white_calibration_relative_coordinates[0, 1]),
+            int(white_calibration_relative_coordinates[2, 1]),
+        )
+        cropped = destripe_cube_columns(
+            cropped,
+            reference_rows=white_rows,
+            smooth_window=pre_destripe_smooth_window,
+            strength=pre_destripe_strength,
+            min_gain=pre_destripe_min_gain,
+            max_gain=pre_destripe_max_gain,
+        )
+
+    white_calibration_reference = build_reference_from_roi(
+        cropped,
+        white_calibration_relative_coordinates,
+        cropped.shape,
+        method=reference_method,
+        smooth_window=smooth_window,
     )
-    dark_calibration_reference = replicate_and_extend(
-        cropped, dark_calibration_relative_coordinates, cropped.shape
+    dark_calibration_reference = build_reference_from_roi(
+        cropped,
+        dark_calibration_relative_coordinates,
+        cropped.shape,
+        method=reference_method,
+        smooth_window=smooth_window,
     )
 
     assert (
@@ -330,10 +703,37 @@ def white_dark_calibrate_from_rois(raw_hdr, white_roi, dark_roi, outdir):
         == dark_calibration_reference.shape
     ), "Shapes of cropped image and calibration references do not match."
 
-    calibrated = (cropped - dark_calibration_reference) / (
-        white_calibration_reference - dark_calibration_reference
+    denominator = white_calibration_reference - dark_calibration_reference
+    epsilon = 1e-6
+    denominator = np.where(
+        denominator >= 0,
+        np.maximum(denominator, epsilon),
+        np.minimum(denominator, -epsilon),
     )
+
+    calibrated = (cropped - dark_calibration_reference) / denominator
     calibrated = np.clip(calibrated, 0, 1)
+
+    if apply_column_destriping:
+        calibrated = _destripe_columns_with_white_roi(
+            calibrated,
+            white_calibration_relative_coordinates,
+            smooth_window=destripe_smooth_window,
+            strength=destripe_strength,
+            min_gain=destripe_min_gain,
+            max_gain=destripe_max_gain,
+        )
+
+    if apply_row_destriping:
+        calibrated = _destripe_rows_with_white_roi(
+            calibrated,
+            white_calibration_relative_coordinates,
+            smooth_window=row_destripe_smooth_window,
+            strength=row_destripe_strength,
+            min_gain=row_destripe_min_gain,
+            max_gain=row_destripe_max_gain,
+            background_percentile=row_destripe_background_percentile,
+        )
 
     # Do not auto-save the ROI-calibrated cube here —
     # let the caller (GUI) decide when/where to save the result.
