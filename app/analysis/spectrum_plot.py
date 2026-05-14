@@ -112,6 +112,60 @@ def cross_calibrate_and_plot(fx10_path, fx17_path, overlap=(900, 1000), overlap_
 
 if __name__ == "__main__":
     # Example usage:
-    fx10_path = r"D:\anu-files\ANU\data\csiro_fx10_17_2_wheat\no-background\004-specim-fx10_no_background.hdr"
-    fx17_path = r"D:\anu-files\ANU\data\csiro_fx10_17_2_wheat\no-background\004-specim-fx17_no_background.hdr"
-    results = cross_calibrate_and_plot(fx10_path, fx17_path)
+    fx17path = r'/home/sriram/ANU/data/aruco_only_arucoplants/calibrated/003-specim-fx17_calibrated.hdr'
+    fx10path = r'/home/sriram/ANU/data/aruco_only_arucoplants/calibrated/003-specim-fx10_calibrated.hdr'
+    results = cross_calibrate_and_plot(fx10path, fx17path)
+    print(results)
+    img = spectral.open_image(fx17path)
+    cube = img.load().astype(np.float32)   # (H, W, Bands)
+
+    # Apply calibration to every pixel and band
+    corrected_cube = results["a"] * cube + results["b"]
+
+    # Optional: clip to valid reflectance range
+    corrected_cube = np.clip(corrected_cube, 0, 1)
+
+
+
+    def plotimg(image):
+        # Open hyperspectral image
+
+        # Load hyperspectral cube
+        data = image  # shape: (H, W, Bands)
+
+        # Read wavelengths from metadata
+        wls = img.metadata.get("wavelength")
+
+        if wls is None:
+            raise ValueError("No wavelength information found in metadata.")
+
+        # Convert wavelength strings to float array
+        wls = np.array([float(w) for w in wls])
+
+        # Find band indices between 900 and 1000 nm
+        band_mask = (wls >= 900) & (wls <= 1000)
+
+        if not np.any(band_mask):
+            raise ValueError("No bands found between 900 and 1000 nm.")
+
+        # Average selected bands
+        avg_img = np.mean(data[:, :, band_mask], axis=2)
+        return avg_img
+
+    avg_img1 = plotimg(cube)
+    avg_img2 = plotimg(corrected_cube)
+
+    # Plot
+    plt.figure(figsize=(8, 6))
+    plt.subplot(1, 2, 1)
+    plt.imshow(avg_img1, cmap="gray")
+    plt.title("Average Image (900-1000 nm) - FX17")
+    plt.colorbar(label="Mean Reflectance / Intensity")
+    plt.axis("off")
+    plt.subplot(1, 2, 2)
+    plt.imshow(avg_img2, cmap="gray")
+    plt.title("Average Image (900-1000 nm) - FX17 Corrected")
+    plt.colorbar(label="Mean Reflectance / Intensity")
+    plt.axis("off")
+
+    plt.show()
